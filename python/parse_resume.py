@@ -19,14 +19,16 @@ API_KEY = os.environ.get("HIRELAYER_API_KEY")
 
 
 class HireLayerError(Exception):
-    """An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}}."""
+    """An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}, "request_id"}."""
 
-    def __init__(self, status, error):
+    def __init__(self, status, error, request_id=None):
         self.status = status
         self.code = error.get("code")
         self.param = error.get("param")
         self.doc_url = error.get("doc_url")
-        super().__init__(f"HTTP {status} {self.code}: {error.get('message')}")
+        self.request_id = request_id  # quote it to HireLayer support
+        support = f" (request_id {request_id})" if request_id else ""
+        super().__init__(f"HTTP {status} {self.code}: {error.get('message')}{support}")
 
 
 def post(path, **kwargs):
@@ -55,11 +57,14 @@ def retry_delay(response, attempt):
 
 
 def api_error(response):
+    request_id = response.headers.get("HireLayer-Request-Id")
     try:
-        error = response.json()["error"]
-    except (ValueError, KeyError, TypeError):
+        body = response.json()
+        error = body["error"]
+        request_id = body.get("request_id", request_id)
+    except (ValueError, KeyError, TypeError, AttributeError):
         error = {"code": "unexpected_response", "message": response.text[:200]}
-    return HireLayerError(response.status_code, error)
+    return HireLayerError(response.status_code, error, request_id)
 
 
 def main():

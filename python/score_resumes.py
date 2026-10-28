@@ -20,14 +20,28 @@ API_KEY = os.environ.get("HIRELAYER_API_KEY")
 
 
 class HireLayerError(Exception):
-    """An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}}."""
+    """An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}, "request_id"}."""
 
-    def __init__(self, status, error):
+    def __init__(self, status, error, request_id=None):
         self.status = status
         self.code = error.get("code")
         self.param = error.get("param")
         self.doc_url = error.get("doc_url")
-        super().__init__(f"HTTP {status} {self.code}: {error.get('message')}")
+        self.request_id = request_id  # quote it to HireLayer support
+        support = f" (request_id {request_id})" if request_id else ""
+        super().__init__(f"HTTP {status} {self.code}: {error.get('message')}{support}")
+
+
+def get(url):
+    """GET a URL the API returned, such as results_url. Same retries as post."""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        response = requests.get(url, headers={"X-API-Key": API_KEY}, timeout=TIMEOUT)
+        if response.status_code in (429, 502, 503) and attempt < MAX_ATTEMPTS:
+            time.sleep(retry_delay(response, attempt))
+            continue
+        if response.status_code >= 400:
+            raise api_error(response)
+        return response
 
 
 def post(path, **kwargs):
@@ -56,11 +70,14 @@ def retry_delay(response, attempt):
 
 
 def api_error(response):
+    request_id = response.headers.get("HireLayer-Request-Id")
     try:
-        error = response.json()["error"]
-    except (ValueError, KeyError, TypeError):
+        body = response.json()
+        error = body["error"]
+        request_id = body.get("request_id", request_id)
+    except (ValueError, KeyError, TypeError, AttributeError):
         error = {"code": "unexpected_response", "message": response.text[:200]}
-    return HireLayerError(response.status_code, error)
+    return HireLayerError(response.status_code, error, request_id)
 
 
 def main():
@@ -97,11 +114,18 @@ def main():
         sys.exit(f"{error} ({error.doc_url})")
 
     result = response.json()
-    if response.status_code == 202:  # a large call: the scores are computed in the background
-        print("Accepted, results at:", result["results_url"])
-        return
+    scores = result.get("scores")
+    if response.status_code == 202:
+        # A large or slow call: the scores are computed in the background.
+        # Read results_url until no resume is pending (its scores are in "data").
+        print("Still scoring, reading", result["results_url"])
+        while True:
+            time.sleep(5)
+            scores = get(result["results_url"]).json()["data"]
+            if all(score["evaluation_status"] != "pending" for score in scores):
+                break
 
-    for score in result["scores"]:  # best first
+    for score in scores:  # best first
         if score["evaluation_status"] != "completed":
             code = (score.get("error") or {}).get("code")
             print(f"{score['rank']}. {score['reference']}: {score['evaluation_status']} ({code})")
@@ -109,8 +133,9 @@ def main():
         print(f"{score['rank']}. {score['reference']}: {score['score']:.2f} {score.get('verdict') or '(no verdict)'}")
         print(f"   {score.get('summary')}")
 
-    print("job_id:", result["job"]["job_id"])
-    print("credits used:", result["credits_used"])
+    print("job_id:", result["job"]["job_id"] if "job" in result else result["job_id"])
+    if "credits_used" in result:
+        print("credits used:", result["credits_used"])
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ catch (HireLayerException error)
         "insufficient_credits" => "Out of credits: see https://hirelayer.co/pricing",
         "resume_unreadable" => "The resume file could not be read (not billed)",
         "job_unreadable" => "The job file could not be read (not billed)",
-        _ => $"{error.Message} ({error.DocUrl})",
+        _ => $"{error.Message} ({error.DocUrl}, request_id {error.RequestId ?? "none"})",
     });
     return 1;
 }
@@ -103,14 +103,22 @@ async Task<int> ScoreAsync(string jobPath, string[] resumePaths)
         return form;
     });
 
+    var scores = JsonRead.Items(json, "scores").ToList();
     if (status == HttpStatusCode.Accepted)
     {
-        // A large call: the scores are computed in the background.
-        Console.WriteLine($"Accepted, results at: {JsonRead.Str(json, "results_url")}");
-        return 0;
+        // A large or slow call: the scores are computed in the background.
+        // Read results_url until no resume is pending (its scores are in "data").
+        var resultsUrl = JsonRead.Str(json, "results_url")!;
+        Console.WriteLine($"Still scoring, reading {resultsUrl}");
+        do
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            using var read = await http.GetAsync(resultsUrl);
+            scores = JsonRead.Items(await ReadJsonAsync(read), "data").ToList();
+        } while (scores.Any(score => JsonRead.Str(score, "evaluation_status") == "pending"));
     }
 
-    foreach (var score in JsonRead.Items(json, "scores")) // best first
+    foreach (var score in scores) // best first
     {
         var rank = score.GetProperty("rank").GetInt32();
         var reference = JsonRead.Str(score, "reference");
@@ -125,8 +133,12 @@ async Task<int> ScoreAsync(string jobPath, string[] resumePaths)
         Console.WriteLine($"{rank}. {reference}: {score.GetProperty("score").GetDouble():0.00} {verdict}");
         Console.WriteLine($"   {JsonRead.Str(score, "summary")}");
     }
-    Console.WriteLine($"job_id: {JsonRead.Str(json.GetProperty("job"), "job_id") ?? "(not stored)"}");
-    Console.WriteLine($"credits used: {json.GetProperty("credits_used").GetInt32()}");
+    var jobId = json.TryGetProperty("job", out var job) ? JsonRead.Str(job, "job_id") : JsonRead.Str(json, "job_id");
+    Console.WriteLine($"job_id: {jobId ?? "(not stored)"}");
+    if (json.TryGetProperty("credits_used", out var creditsUsed))
+    {
+        Console.WriteLine($"credits used: {creditsUsed.GetInt32()}");
+    }
     return 0;
 }
 
@@ -147,7 +159,8 @@ async Task<(HttpStatusCode Status, JsonElement Body)> PostAsync(string path, Fun
         var body = await ReadJsonAsync(response);
         if (status >= 400)
         {
-            throw HireLayerException.From(status, body);
+            var headerId = response.Headers.TryGetValues("HireLayer-Request-Id", out var ids) ? ids.FirstOrDefault() : null;
+            throw HireLayerException.From(status, body, headerId);
         }
         return (response.StatusCode, body);
     }
@@ -199,23 +212,26 @@ static int Usage()
     return 2;
 }
 
-/// <summary>An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}}.</summary>
-sealed class HireLayerException(int status, string code, string message, string? docUrl)
+/// <summary>An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}, "request_id"}.</summary>
+sealed class HireLayerException(int status, string code, string message, string? docUrl, string? requestId)
     : Exception($"HTTP {status} {code}: {message}")
 {
     public int Status { get; } = status;
     public string Code { get; } = code;
     public string? DocUrl { get; } = docUrl;
+    /// <summary>Quote it to HireLayer support.</summary>
+    public string? RequestId { get; } = requestId;
 
-    public static HireLayerException From(int statusCode, JsonElement body)
+    public static HireLayerException From(int statusCode, JsonElement body, string? headerRequestId)
     {
+        var requestId = JsonRead.Str(body, "request_id") ?? headerRequestId;
         if (body.ValueKind == JsonValueKind.Object
             && body.TryGetProperty("error", out var error)
             && error.ValueKind == JsonValueKind.Object)
         {
-            return new(statusCode, JsonRead.Str(error, "code") ?? "unknown", JsonRead.Str(error, "message") ?? "", JsonRead.Str(error, "doc_url"));
+            return new(statusCode, JsonRead.Str(error, "code") ?? "unknown", JsonRead.Str(error, "message") ?? "", JsonRead.Str(error, "doc_url"), requestId);
         }
-        return new(statusCode, "unexpected_response", $"HTTP {statusCode}", null);
+        return new(statusCode, "unexpected_response", $"HTTP {statusCode}", null, requestId);
     }
 }
 

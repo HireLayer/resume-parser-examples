@@ -16,14 +16,15 @@ const MAX_ATTEMPTS = 4
 const apiKey = process.env.HIRELAYER_API_KEY
 if (!apiKey) throw new Error('HIRELAYER_API_KEY is not set')
 
-/** An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}}. */
+/** An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}, "request_id"}. */
 class HireLayerError extends Error {
-  constructor(status, error) {
-    super(`HTTP ${status} ${error.code}: ${error.message}`)
+  constructor(status, error, requestId) {
+    super(`HTTP ${status} ${error.code}: ${error.message}${requestId ? ` (request_id ${requestId})` : ''}`)
     this.status = status
     this.code = error.code
     this.param = error.param
     this.docUrl = error.doc_url
+    this.requestId = requestId // quote it to HireLayer support
   }
 }
 
@@ -42,7 +43,8 @@ async function post(path, makeForm) {
     }
     if (response.status >= 400) {
       const error = response.data?.error ?? { code: 'unexpected_response', message: String(response.data).slice(0, 200) }
-      throw new HireLayerError(response.status, error)
+      const requestId = response.data?.request_id ?? response.headers['hirelayer-request-id']
+      throw new HireLayerError(response.status, error, requestId)
     }
     return response
   }

@@ -16,14 +16,15 @@ const MAX_ATTEMPTS = 4
 const apiKey = process.env.HIRELAYER_API_KEY
 if (!apiKey) throw new Error('HIRELAYER_API_KEY is not set')
 
-/** An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}}. */
+/** An answer in the v4 error format: {"error": {"code", "message", "param", "doc_url"}, "request_id"}. */
 class HireLayerError extends Error {
-  constructor(status, error) {
-    super(`HTTP ${status} ${error.code}: ${error.message}`)
+  constructor(status, error, requestId) {
+    super(`HTTP ${status} ${error.code}: ${error.message}${requestId ? ` (request_id ${requestId})` : ''}`)
     this.status = status
     this.code = error.code
     this.param = error.param
     this.docUrl = error.doc_url
+    this.requestId = requestId // quote it to HireLayer support
   }
 }
 
@@ -42,7 +43,8 @@ async function post(path, makeForm) {
     }
     if (response.status >= 400) {
       const error = response.data?.error ?? { code: 'unexpected_response', message: String(response.data).slice(0, 200) }
-      throw new HireLayerError(response.status, error)
+      const requestId = response.data?.request_id ?? response.headers['hirelayer-request-id']
+      throw new HireLayerError(response.status, error, requestId)
     }
     return response
   }
@@ -84,13 +86,19 @@ try {
 }
 
 const result = response.data
+let scores = result.scores
 if (response.status === 202) {
-  // A large call: the scores are computed in the background.
-  console.log(`Accepted, results at: ${result.results_url}`)
-  process.exit(0)
+  // A large or slow call: the scores are computed in the background.
+  // Read results_url until no resume is pending (its scores are in "data").
+  console.log(`Still scoring, reading ${result.results_url}`)
+  do {
+    await new Promise((resolve) => setTimeout(resolve, 5_000))
+    const read = await axios.get(result.results_url, { headers: { 'X-API-Key': apiKey }, timeout: TIMEOUT_MS })
+    scores = read.data.data
+  } while (scores.some((score) => score.evaluation_status === 'pending'))
 }
 
-for (const score of result.scores) {
+for (const score of scores) {
   // best first
   if (score.evaluation_status !== 'completed') {
     console.log(`${score.rank}. ${score.reference}: ${score.evaluation_status} (${score.error?.code})`)
@@ -99,5 +107,5 @@ for (const score of result.scores) {
   console.log(`${score.rank}. ${score.reference}: ${score.score.toFixed(2)} ${score.verdict ?? '(no verdict)'}`)
   console.log(`   ${score.summary}`)
 }
-console.log(`job_id: ${result.job.job_id}`)
-console.log(`credits used: ${result.credits_used}`)
+console.log(`job_id: ${result.job?.job_id ?? result.job_id}`)
+if (result.credits_used !== undefined) console.log(`credits used: ${result.credits_used}`)

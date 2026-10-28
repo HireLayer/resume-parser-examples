@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # HireLayer Resume Scorer: POST /api/v4/resumes/score
-# 1 credit per resume evaluated, +1 per resume file parsed in the call; 0 for a pair already scored.
+# 1 credit per resume evaluated, +1 per resume file parsed in the call, +1 per call with precise_ranking; 0 for a pair already scored.
 # Requires HIRELAYER_API_KEY and jq (free plan: 50 credits a month at https://hirelayer.co)
 #
 # Files:  ./score-resumes.sh [job.txt] [resume1.pdf resume2.pdf ...]
 # By ids: ./score-resumes.sh --ids <job_id> <application_id> [<application_id> ...]
 #
 # Scores come back best first: rank, score (0 to 1), verdict, summary and criteria[].
-# precise_ranking re-ranks the 10 best against each other and adds ranking_reason, at no extra cost.
+# precise_ranking re-ranks the 10 best against each other and adds ranking_reason, for 1 credit more per call.
+# A slow call answers 202 with a results_url: GET it (with the same key) until no score is pending.
 set -euo pipefail
 
 url=https://hirelayer.co/api/v4/resumes/score

@@ -70,18 +70,24 @@ if ($status >= 400) {
     fwrite(STDERR, match ($error['code']) {
         'insufficient_credits' => 'Out of credits: see https://hirelayer.co/pricing',
         'job_unreadable' => "$jobPath could not be read as a job description (not billed)",
-        default => sprintf('HTTP %d %s: %s (%s)', $status, $error['code'], $error['message'], $error['doc_url'] ?? ''),
+        default => sprintf('HTTP %d %s: %s (%s, request_id %s)', $status, $error['code'], $error['message'], $error['doc_url'] ?? '', $data['request_id'] ?? 'none'),
     } . PHP_EOL);
     exit(1);
 }
 
+$scores = $data['scores'] ?? [];
 if ($status === 202) {
-    // A large call: the scores are computed in the background.
-    echo 'Accepted, results at: ', $data['results_url'], PHP_EOL;
-    exit(0);
+    // A large or slow call: the scores are computed in the background.
+    // Read results_url until no resume is pending (its scores are in "data").
+    echo 'Still scoring, reading ', $data['results_url'], PHP_EOL;
+    do {
+        sleep(5);
+        $read = json_decode((string) $http->get($data['results_url'])->getBody(), true);
+        $scores = $read['data'] ?? [];
+    } while (in_array('pending', array_column($scores, 'evaluation_status'), true));
 }
 
-foreach ($data['scores'] as $score) { // best first
+foreach ($scores as $score) { // best first
     if ($score['evaluation_status'] !== 'completed') {
         printf("%d. %s: %s (%s)\n", $score['rank'], $score['reference'], $score['evaluation_status'], $score['error']['code'] ?? '');
         continue;
@@ -89,8 +95,10 @@ foreach ($data['scores'] as $score) { // best first
     printf("%d. %s: %.2f %s\n", $score['rank'], $score['reference'], $score['score'], $score['verdict'] ?? '(no verdict)');
     printf("   %s\n", $score['summary'] ?? '');
 }
-echo 'job_id: ', $data['job']['job_id'] ?? '(not stored)', PHP_EOL;
-echo 'credits used: ', $data['credits_used'], PHP_EOL;
+echo 'job_id: ', $data['job']['job_id'] ?? $data['job_id'] ?? '(not stored)', PHP_EOL;
+if (isset($data['credits_used'])) {
+    echo 'credits used: ', $data['credits_used'], PHP_EOL;
+}
 
 /**
  * POST with the options built by $options (again on each attempt).

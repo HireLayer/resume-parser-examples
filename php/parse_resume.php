@@ -48,7 +48,7 @@ if ($status >= 400) {
     fwrite(STDERR, match ($error['code']) {
         'insufficient_credits' => 'Out of credits: see https://hirelayer.co/pricing',
         'resume_unreadable' => "$path could not be read as a resume (not billed)",
-        default => sprintf('HTTP %d %s: %s (%s)', $status, $error['code'], $error['message'], $error['doc_url'] ?? ''),
+        default => sprintf('HTTP %d %s: %s (%s, request_id %s)', $status, $error['code'], $error['message'], $error['doc_url'] ?? '', $data['request_id'] ?? 'none'),
     } . PHP_EOL);
     exit(1);
 }
